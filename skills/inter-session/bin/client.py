@@ -249,14 +249,34 @@ class Client:
     async def _connect_and_serve(self) -> None:
         # Defense-in-depth against port squatting: refuse to send the bearer
         # token to a process that doesn't claim to be our server.
+        #
+        # A failed check is usually transient: during server failover the idle
+        # server unlinks its own pidfile as it tears down, so the port can look
+        # "up" for a beat before the next server publishes its identity. The old
+        # code set self._stop here and gave up permanently, stranding a session
+        # off the bus for a sub-second handoff window (the "identity cannot be
+        # verified" bug). Instead, return so run()'s reconnect loop retries with
+        # backoff — its ensure_server_running() re-elects/spawns a server if the
+        # port is actually free. No token is sent on this path, so squatter
+        # protection is preserved; only give up after many failed attempts,
+        # which indicates a real squatter rather than a handoff.
         if not shared.verify_server_identity(self.host, self.port):
-            _print_line(
-                "[inter-session] server identity check failed "
-                f"(port {self.port} is held by something that isn't bin/server.py); "
-                "refusing to connect"
-            )
-            self._stop.set()
+            self._identity_fail_count = getattr(self, "_identity_fail_count", 0) + 1
+            if self._identity_fail_count == 1:
+                _print_line(
+                    "[inter-session] server identity not yet verified on port "
+                    f"{self.port}; retrying"
+                )
+            if self._identity_fail_count > 40:
+                _print_line(
+                    "[inter-session] server identity still unverified after retries "
+                    f"(port {self.port} held by something that isn't bin/server.py); "
+                    "refusing to connect"
+                )
+                self._stop.set()
+                return
             return
+        self._identity_fail_count = 0
         token = shared.ensure_token(shared.token_path())
         async with websockets.connect(
             f"ws://{self.host}:{self.port}/",
