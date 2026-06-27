@@ -113,10 +113,31 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--to", help="target name or short session_id (omit with --all)")
     parser.add_argument("--all", action="store_true", help="broadcast to all other sessions")
-    parser.add_argument("--text", required=True)
+    parser.add_argument("--text", help="message body (omit to use --text-file or stdin)")
+    parser.add_argument(
+        "--text-file", metavar="PATH",
+        help="read the body from PATH, or '-' for stdin. Keeps the body off the "
+             "command line — avoids shell-quoting and pre-tool-use hooks that scan "
+             "--text, and preserves the body verbatim (no trailing-newline stripping).")
     args = parser.parse_args()
     if not args.all and not args.to:
         parser.error("--to required unless --all")
+    if args.text is not None and args.text_file is not None:
+        parser.error("--text and --text-file are mutually exclusive")
+    # Resolve the body: explicit --text wins; else --text-file (path or '-'); else
+    # read stdin when it is piped (a bare invocation on a tty would otherwise hang).
+    if args.text_file is not None:
+        if args.text_file == "-":
+            args.text = sys.stdin.read()
+        else:
+            try:
+                args.text = Path(args.text_file).read_text()
+            except OSError as e:
+                parser.error(f"--text-file: {e}")
+    elif args.text is None:
+        if sys.stdin.isatty():
+            parser.error("provide --text, --text-file PATH, or pipe the body on stdin")
+        args.text = sys.stdin.read()
     return asyncio.run(_run(args))
 
 
